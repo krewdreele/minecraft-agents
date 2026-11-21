@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration>
+    <Appenders>
+        <Console name="Terminal">
+            <PatternLayout pattern="[%d{HH:mm:ss}] %msg%n"/>
+        </Console>
+        <File name="RunLog" fileName="logs/console-${date:yyyyMMdd-HHmmss}-${sys:minecraftAgents.console.pid}.log">
+            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level] (%logger) %msg%n"/>
+        </File>
+    </Appenders>
+    <Loggers>
+        <Logger name="org.minecraftagents.console" level="info" additivity="false">
+            <AppenderRef ref="Terminal"/>
+            <AppenderRef ref="RunLog"/>
+        </Logger>
+        <Root level="info">
+            <AppenderRef ref="Terminal" level="warn"/>
+            <AppenderRef ref="RunLog"/>
+        </Root>
+    </Loggers>
+</Configuration>
