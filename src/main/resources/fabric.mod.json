@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "minecraft_agents",
+  "version": "${version}",
+  "name": "Minecraft Agents",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["org.minecraftagents.MinecraftAgentsClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.14",
+    "minecraft": "1.20.1",
+    "java": ">=17"
+  }
+}
