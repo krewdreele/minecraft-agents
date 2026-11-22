@@ -1,0 +1,9 @@
+{
+  "required": true,
+  "package": "org.minecraftagents.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": ["ClientInputMixin"],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

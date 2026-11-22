@@ -1,13 +1,20 @@
 package org.minecraftagents.tools;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 final class AgentInventory {
+    private static final Gson GSON = new Gson();
+
     record Slot(int slot, String item, int count, Integer healing) {
     }
 
@@ -25,6 +32,29 @@ final class AgentInventory {
             }
         }
         return slots;
+    }
+
+    static JsonArray observedSlots(Inventory inventory) {
+        return GSON.toJsonTree(slots(inventory)).getAsJsonArray();
+    }
+
+    static Map<String, Integer> totals(Inventory inventory) {
+        var counts = new LinkedHashMap<String, Integer>();
+        for (var slot : slots(inventory)) {
+            counts.merge(slot.item(), slot.count(), Integer::sum);
+        }
+        return counts;
+    }
+
+    static int count(Inventory inventory, Item item) {
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            var stack = inventory.getStack(slot);
+            if (stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     // Insert first into matching stacks, then into empty slots. The caller removes only what fit.

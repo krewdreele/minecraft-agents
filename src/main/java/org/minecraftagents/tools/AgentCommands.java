@@ -1,377 +1,284 @@
 package org.minecraftagents.tools;
 
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonParseException;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
-import net.minecraft.command.argument.BlockPosArgumentType;
-import net.minecraft.entity.EntityType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.ClickEvent;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
+import java.util.function.BiFunction;
 
 import static net.minecraft.server.command.CommandManager.argument;
 import static net.minecraft.server.command.CommandManager.literal;
 
-/** Same tool calls as the Java API, exposed for development in an operator's game chat. */
+/** Operator commands for recording, learning, and testing skills. */
 public final class AgentCommands {
     private static final Logger LOGGER = LoggerFactory.getLogger(AgentCommands.class);
+
+    private enum DebugAction { PLAN, RUN, TRACE, TRACE_ON, TRACE_OFF }
 
     private AgentCommands() {
     }
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
-        var agent = literal("agent").requires(source -> source.hasPermissionLevel(2))
-                .then(literal("tools").executes(context -> describe(context.getSource())))
-                .then(literal("spawn").then(argument("name", StringArgumentType.word())
-                        .then(argument("pos", BlockPosArgumentType.blockPos())
-                                .executes(context -> spawn(context.getSource(), StringArgumentType.getString(context, "name"),
-                                        BlockPosArgumentType.getLoadedBlockPos(context, "pos"))))))
-                .then(literal("call").then(argument("actor", StringArgumentType.word())
-                        .then(argument("tool", StringArgumentType.word())
-                                .suggests((context, builder) -> {
-                                    AgentTools.descriptors().stream().map(AgentTools.Descriptor::name)
-                                            .filter(name -> name.startsWith(builder.getRemaining())).forEach(builder::suggest);
-                                    return builder.buildFuture();
-                                })
-                                .executes(context -> call(context.getSource(), StringArgumentType.getString(context, "actor"),
-                                        StringArgumentType.getString(context, "tool"), "{}"))
-                                .then(argument("json", StringArgumentType.greedyString())
-                                        .executes(context -> call(context.getSource(), StringArgumentType.getString(context, "actor"),
-                                                StringArgumentType.getString(context, "tool"), StringArgumentType.getString(context, "json")))))));
-
-        agent.then(runCommand("run", AgentModelClient.Provider.OPENAI));
-        agent.then(runCommand("run-local", AgentModelClient.Provider.OLLAMA));
-        agent.then(literal("trial")
-                .then(literal("status").executes(context -> {
-                    var source = context.getSource();
-                    source.sendFeedback(() -> Text.literal(AgentTrial.status(source.getWorld())), false);
-                    return 1;
-                }))
-                .then(literal("stop").executes(context -> {
-                    var source = context.getSource();
-                    try {
-                        AgentTrial.stop(source.getWorld());
-                        return 1;
-                    } catch (IllegalStateException failure) {
-                        source.sendError(Text.literal(failure.getMessage()));
-                        return 0;
-                    }
-                }))
-                .then(literal("pair")
-                        .then(argument("first", StringArgumentType.word())
-                                .then(argument("second", StringArgumentType.word())
-                                        .executes(context -> startTrial(context, AgentTrial.DEFAULT_DAYS, false))
-                                        .then(argument("days", IntegerArgumentType.integer(1))
-                                                .executes(context -> startTrial(context,
-                                                        IntegerArgumentType.getInteger(context, "days"), false))))))
-                .then(argument("first", StringArgumentType.word())
-                        .then(argument("second", StringArgumentType.word())
-                                .then(argument("third", StringArgumentType.word())
-                                        .executes(context -> startTrial(context, AgentTrial.DEFAULT_DAYS, true))
-                                        .then(argument("days", IntegerArgumentType.integer(1))
-                                                .executes(context -> startTrial(context,
-                                                        IntegerArgumentType.getInteger(context, "days"), true)))))));
-        agent.then(literal("status").then(argument("actor", StringArgumentType.word())
-                .executes(context -> loopStatus(context.getSource(), StringArgumentType.getString(context, "actor"), false))));
-        agent.then(literal("stop").then(argument("actor", StringArgumentType.word())
-                .executes(context -> loopStatus(context.getSource(), StringArgumentType.getString(context, "actor"), true))));
+        var agent = literal("agent").requires(source -> source.hasPermissionLevel(2));
+        agent.then(literal("arena").executes(context -> arena(context.getSource())));
+        agent.then(runCommand("run", AgentModelClient.Provider.OPENAI, false));
+        agent.then(runCommand("run-local", AgentModelClient.Provider.OLLAMA, false));
+        agent.then(runCommand("adapt", AgentModelClient.Provider.OPENAI, true));
+        agent.then(runCommand("adapt-local", AgentModelClient.Provider.OLLAMA, true));
+        agent.then(literal("do").then(argument("actor", StringArgumentType.word())
+                .then(argument("skill", StringArgumentType.word())
+                        .executes(context -> skill(context, true, 0))
+                        .then(argument("version", IntegerArgumentType.integer(1))
+                                .executes(context -> skill(context, true, IntegerArgumentType.getInteger(context, "version")))))));
+        agent.then(literal("skills").then(argument("actor", StringArgumentType.word())
+                .executes(AgentCommands::listSkills)
+                .then(argument("skill", StringArgumentType.word())
+                        .executes(context -> skill(context, false, 0))
+                        .then(argument("version", IntegerArgumentType.integer(1))
+                                .executes(context -> skill(context, false, IntegerArgumentType.getInteger(context, "version")))))));
+        agent.then(literal("status").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::status)));
+        agent.then(literal("stop").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::stop)));
+        agent.then(literal("view").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::view)));
+        agent.then(literal("debug").then(argument("actor", StringArgumentType.word())
+                .then(literal("plan").executes(context -> debug(context, DebugAction.PLAN)))
+                .then(literal("run").executes(context -> debug(context, DebugAction.RUN)))
+                .then(literal("trace").executes(context -> debug(context, DebugAction.TRACE))
+                        .then(literal("on").executes(context -> debug(context, DebugAction.TRACE_ON)))
+                        .then(literal("off").executes(context -> debug(context, DebugAction.TRACE_OFF))))));
+        agent.then(literal("demo")
+                .then(literal("record").then(argument("name", StringArgumentType.word())
+                        .executes(context -> demo(context, false, false))
+                        .then(argument("subject", StringArgumentType.word())
+                                .executes(context -> demo(context, false, true)))))
+                .then(literal("stop")
+                        .executes(context -> demo(context, true, false))
+                        .then(argument("subject", StringArgumentType.word())
+                                .executes(context -> demo(context, true, true)))));
         dispatcher.register(agent);
-        dispatcher.register(literal("agent-map").requires(source -> source.getEntity() instanceof ServerPlayerEntity)
-                .executes(context -> showMap(context.getSource(), AgentNavigation.MAP_RADIUS))
-                .then(argument("radius", IntegerArgumentType.integer(1, AgentNavigation.MAX_RADIUS))
-                        .executes(context -> showMap(context.getSource(), IntegerArgumentType.getInteger(context, "radius")))));
     }
 
-    private static int showMap(ServerCommandSource source, int radius) {
-        var map = AgentTools.mapSnapshot(source.getWorld(), source.getEntity(), radius);
-        source.sendFeedback(() -> Text.literal(formatMap(map)), false);
-        return 1;
-    }
-
-    private static int startTrial(CommandContext<ServerCommandSource> context, int days, boolean trio) {
-        ServerCommandSource source = context.getSource();
-        var names = new ArrayList<>(List.of(StringArgumentType.getString(context, "first"),
-                StringArgumentType.getString(context, "second")));
-        if (trio) {
-            names.add(StringArgumentType.getString(context, "third"));
-        }
-        List<UUID> ids = names.stream().map(name -> findActor(source, name)).toList();
-        if (ids.stream().anyMatch(id -> id == null)) {
-            source.sendError(Text.literal("Choose unique actors within 32 blocks, or use their UUIDs."));
-            return 0;
-        }
+    private static int arena(ServerCommandSource source) {
         try {
-            String message = AgentTrial.start(source.getWorld(), ids, days);
-            source.sendFeedback(() -> Text.literal(message), false);
-            return 1;
-        } catch (IllegalStateException failure) {
-            source.sendError(Text.literal(failure.getMessage()));
-            return 0;
+            return feedback(source, AgentArena.create(source));
+        } catch (AgentTools.ToolFailure failure) {
+            return error(source, failure.getMessage());
         }
     }
 
-    private static LiteralArgumentBuilder<ServerCommandSource> runCommand(String name, AgentModelClient.Provider provider) {
+    private static LiteralArgumentBuilder<ServerCommandSource> runCommand(String name, AgentModelClient.Provider provider,
+                                                                          boolean adapt) {
+        String input = adapt ? "skill" : "goal";
         return literal(name).then(argument("actor", StringArgumentType.word())
                 .then(argument("turns", IntegerArgumentType.integer(1, AgentLoop.MAX_TURNS))
-                        .then(argument("goal", StringArgumentType.greedyString())
-                                .executes(context -> startLoop(context.getSource(),
-                                        StringArgumentType.getString(context, "actor"),
-                                        IntegerArgumentType.getInteger(context, "turns"),
-                                        StringArgumentType.getString(context, "goal"), provider)))));
+                        .then(argument(input, adapt ? StringArgumentType.word() : StringArgumentType.greedyString())
+                                .executes(context -> withActor(context, (source, actor) -> {
+                                    String task = StringArgumentType.getString(context, input);
+                                    int turns = IntegerArgumentType.getInteger(context, "turns");
+                                    UUID operator = source.getEntity() instanceof ServerPlayerEntity player ? player.getUuid() : null;
+                                    String message = adapt ? AgentLoop.adapt(source.getWorld(), actor, turns, task, provider, operator)
+                                            : AgentLoop.start(source.getWorld(), actor, turns, task, provider, operator);
+                                    return feedback(source, message);
+                                })))));
     }
 
-    private static int startLoop(ServerCommandSource source, String label, int turns, String goal,
-            AgentModelClient.Provider provider) {
-        UUID id = findActor(source, label);
-        if (id == null) {
-            source.sendError(Text.literal("Choose a unique actor within 32 blocks, or use its UUID."));
-            return 0;
+    private static int skill(CommandContext<ServerCommandSource> context, boolean run, int version) {
+        var args = new JsonObject();
+        args.addProperty("name", StringArgumentType.getString(context, "skill"));
+        if (version > 0) {
+            args.addProperty("version", version);
         }
-        try {
-            String message = AgentLoop.start(source.getWorld(), id, turns, goal, provider);
-            source.sendFeedback(() -> Text.literal("[Agent loop] " + message), false);
-            return 1;
-        } catch (IllegalStateException failure) {
-            source.sendError(Text.literal("[Agent loop] " + failure.getMessage()));
-            return 0;
-        }
-    }
-
-    private static int loopStatus(ServerCommandSource source, String label, boolean stop) {
-        UUID id = findActor(source, label);
-        if (id == null) {
-            source.sendError(Text.literal("Choose a unique actor within 32 blocks, or use its UUID."));
-            return 0;
-        }
-        String message = AgentLoop.status(source.getWorld(), id, stop);
-        source.sendFeedback(() -> Text.literal("[Agent loop] " + label + " · " + message), false);
-        return 1;
-    }
-
-    private static int describe(ServerCommandSource source) {
-        for (AgentTools.Descriptor tool : AgentTools.descriptors()) {
-            source.sendFeedback(() -> Text.literal(tool.name() + " — " + tool.description()), false);
-        }
-        return 1;
-    }
-
-    private static int spawn(ServerCommandSource source, String name, BlockPos pos) {
-        var world = source.getWorld();
-        if (!world.getWorldBorder().contains(pos) || name.length() > 24) {
-            source.sendError(Text.literal("Use a name of at most 24 characters and a position inside the world border."));
-            return 0;
-        }
-        VillagerEntity actor = EntityType.VILLAGER.create(world);
-        if (actor == null) {
-            source.sendError(Text.literal("Could not create the actor."));
-            return 0;
-        }
-        actor.refreshPositionAndAngles(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, 0, 0);
-        actor.setCustomName(Text.literal(name));
-        actor.setCustomNameVisible(true);
-        actor.setAiDisabled(true);
-        actor.setPersistent();
-        actor.addCommandTag(AgentTools.ACTOR_TAG);
-        if (!world.isSpaceEmpty(actor) || !world.spawnEntity(actor)) {
-            source.sendError(Text.literal("The actor could not spawn at that position."));
-            return 0;
-        }
-        source.sendFeedback(() -> Text.literal("Spawned " + name + " (" + actor.getUuidAsString() + ")."), false);
-        return 1;
-    }
-
-    private static int call(ServerCommandSource source, String label, String tool, String json) {
-        UUID id = findActor(source, label);
-        if (id == null) {
-            source.sendError(Text.literal("Choose a unique actor within 32 blocks, or use its UUID."));
-            return 0;
-        }
-        JsonObject args;
-        try {
-            var value = JsonParser.parseString(json);
-            if (!value.isJsonObject()) {
-                source.sendError(Text.literal("Tool arguments must be a JSON object."));
-                return 0;
+        return withActor(context, (source, actor) -> {
+            if (run) {
+                AgentTools.require(!AgentLoop.isRunning(source.getWorld(), actor.getUuid()),
+                        "Stop the actor's model run before starting a skill directly.");
             }
-            args = value.getAsJsonObject();
-        } catch (JsonParseException exception) {
-            source.sendError(Text.literal("Invalid tool argument JSON."));
+            var result = AgentTools.call(source.getWorld(), actor, run ? "run_skill" : "find_skills", args, false);
+            if (!result.ok()) {
+                return error(source, result.message());
+            }
+            if (run) {
+                return feedback(source, result.message());
+            }
+            var skill = result.data().getAsJsonObject();
+            var plan = new AgentDebug.Plan(skill.get("name").getAsString() + " v" + skill.get("version").getAsInt(),
+                    skill.get("description").getAsString(), skill.get("program").toString());
+            return showPlan(source, actor.getName().getString(), "Saved skill", plan);
+        });
+    }
+
+    private static int listSkills(CommandContext<ServerCommandSource> context) {
+        return withActor(context, (source, actor) -> {
+            var entries = AgentSkills.list(source.getWorld(), actor);
+            var names = new ArrayList<String>();
+            entries.forEach(entry -> {
+                var skill = entry.getAsJsonObject();
+                names.add(skill.get("name").getAsString() + " v" + skill.get("version").getAsInt());
+            });
+            return feedback(source, names.isEmpty() ? "No learned skills yet." : "Learned skills · " + String.join(", ", names));
+        });
+    }
+
+    private static int view(CommandContext<ServerCommandSource> context) {
+        return withActor(context, (source, actor) -> {
+            var view = AgentVision.observe(source.getWorld(), actor);
+            LOGGER.info("[Agent view] {} {}", actor.getName().getString(), view);
+            var pose = view.getAsJsonObject("pose");
+            return feedback(source, actor.getName().getString() + " · Yaw " + pose.get("yaw").getAsFloat()
+                    + "°, pitch " + pose.get("pitch").getAsFloat() + "°. Full view in the run log.");
+        });
+    }
+
+    private static int status(CommandContext<ServerCommandSource> context) {
+        return withActor(context, (source, actor) -> {
+            var world = source.getWorld();
+            var id = actor.getUuid();
+            var loop = AgentLoop.status(world, id);
+            var skill = AgentSkills.status(world, id);
+            if (loop != null) {
+                feedback(source, "Model · " + loop);
+            }
+            if (loop == null || !skill.data().isJsonNull()) {
+                feedback(source, "Skill · " + skill.message());
+            }
+            return 1;
+        });
+    }
+
+    private static int stop(CommandContext<ServerCommandSource> context) {
+        return withActor(context, (source, actor) -> feedback(source, AgentLoop.stop(source.getWorld(), actor.getUuid())
+                ? "Stopped " + actor.getName().getString() + "." : "The actor is idle."));
+    }
+
+    private static int debug(CommandContext<ServerCommandSource> context, DebugAction action) {
+        var source = context.getSource();
+        String label = StringArgumentType.getString(context, "actor");
+        UUID id = findActor(source, label);
+        if (id == null) {
+            source.sendError(Text.literal("Choose a unique actor within 32 blocks, or use its UUID."));
             return 0;
         }
-        AgentTools.Result result = AgentTools.call(source.getWorld(), id, tool, args);
-        Text feedback = Text.literal("[Agent " + tool + "] " + summarize(tool, result));
-        if (!result.ok()) {
-            source.sendError(feedback);
+        var debug = AgentDebug.state(source.getWorld(), id);
+        return switch (action) {
+            case PLAN -> showPlan(source, label, "Last submission", debug.draft);
+            case RUN -> showPlan(source, label, "Last execution", debug.run);
+            case TRACE -> showTrace(source, label, debug);
+            case TRACE_ON, TRACE_OFF -> {
+                debug.tracing = action == DebugAction.TRACE_ON;
+                String message = debug.tracing ? "Tracing enabled for " + label + "."
+                        : "Tracing disabled for " + label + ".";
+                source.sendFeedback(() -> Text.literal(message), false);
+                yield 1;
+            }
+        };
+    }
+
+    private static int showPlan(ServerCommandSource source, String actor, String heading, AgentDebug.Plan plan) {
+        if (plan == null) {
+            source.sendError(Text.literal(heading + " unavailable for " + actor + " in this session."));
             return 0;
+        }
+        String summary = "[Agent debug] " + actor + " · " + heading + " · " + plan.label() + " · " + plan.status();
+        LOGGER.info("{}\n{}", summary, plan.source());
+        var feedback = Text.literal(summary + " Pseudocode in the run log.");
+        if (source.getEntity() instanceof ServerPlayerEntity) {
+            feedback.append(Text.literal(" [Copy pseudocode]").styled(style -> style
+                    .withColor(Formatting.AQUA)
+                    .withClickEvent(new ClickEvent(ClickEvent.Action.COPY_TO_CLIPBOARD, plan.source()))));
         }
         source.sendFeedback(() -> feedback, false);
         return 1;
     }
 
-    private static String summarize(String tool, AgentTools.Result result) {
-        if (result.data().isJsonNull()) {
-            return result.message();
+    private static int showTrace(ServerCommandSource source, String actor, AgentDebug.State debug) {
+        if (debug.events.isEmpty()) {
+            String hint = debug.tracing ? "Run an input skill to collect events."
+                    : "Enable tracing with /agent debug " + actor + " trace on before running a skill.";
+            source.sendFeedback(() -> Text.literal("No trace events for " + actor + ". " + hint), false);
+            return 0;
         }
-        if (tool.equals("find_skills") || tool.equals("skill_status")) {
-            LOGGER.info("[Agent {}] {}", tool, result.data());
-            return result.message() + " Details in the run log.";
+        int count = debug.events.size();
+        String summary = "[Agent debug] " + actor + " · " + debug.run.label() + " · "
+                + count + " trace events. " + debug.run.status();
+        LOGGER.info("{}\n{}", summary, String.join("\n", debug.events));
+        source.sendFeedback(() -> Text.literal(summary + " Full trace in the run log."), false);
+        for (var event : debug.events.subList(Math.max(0, count - 4), count)) {
+            source.sendFeedback(() -> Text.literal(event), false);
         }
-        if (tool.equals("look")) {
-            var view = result.data().getAsJsonObject();
-            var entities = view.getAsJsonArray("entities");
-            var nearby = new ArrayList<String>();
-            for (int index = 0; index < Math.min(4, entities.size()); index++) {
-                var entity = entities.get(index).getAsJsonObject();
-                nearby.add(entity.get("name").getAsString() + " #" + entity.get("id").getAsInt());
-            }
-            LOGGER.info("[Agent look] {}", result.data());
-            String preview = nearby.isEmpty() ? "" : " " + String.join(", ", nearby) + ".";
-            return view.getAsJsonArray("blocks").size() + " visible blocks, " + entities.size() + " nearby entities."
-                    + preview + attackSummary(view) + routeSummary(view) + " Details in the run log.";
-        }
-        if (tool.equals("map")) {
-            var map = result.data().getAsJsonObject();
-            LOGGER.info("[Agent map] {}", map);
-            return formatMap(map);
-        }
-        if (tool.equals("read_knowledge")) {
-            var notes = new ArrayList<String>();
-            for (var value : result.data().getAsJsonArray()) {
-                var note = value.getAsJsonObject();
-                notes.add(note.get("author").getAsString() + " · " + note.get("topic").getAsString()
-                        + " · " + note.get("note").getAsString());
-            }
-            LOGGER.info("[Agent knowledge] {}", result.data());
-            return notes.isEmpty() ? result.message() : String.join("\n", notes);
-        }
-        if (tool.equals("recall")) {
-            var page = result.data().getAsJsonObject();
-            LOGGER.info("[Agent memory] {}", page);
-            var lines = new ArrayList<String>();
-            lines.add(result.message());
-            for (var value : page.getAsJsonArray("entries")) {
-                var entry = value.getAsJsonObject();
-                String label = entry.has("partner") ? entry.get("direction").getAsString() + " "
-                        + entry.get("partner").getAsString() : entry.get("action").getAsString();
-                lines.add(label + " · " + entry.get("detail").getAsString());
-            }
-            if (page.has("nextOffset")) {
-                lines.add("Next offset " + page.get("nextOffset").getAsInt() + ".");
-            }
-            return String.join("\n", lines);
-        }
-        if (tool.equals("recipe_book")) {
-            var page = result.data().getAsJsonObject();
-            var lines = new ArrayList<String>();
-            lines.add(result.message());
-            for (var value : page.getAsJsonArray("recipes")) {
-                var recipe = value.getAsJsonObject();
-                String item = recipe.get("item").getAsString();
-                if (recipe.has("ingredients")) {
-                    item += " x" + recipe.get("yield").getAsInt() + " from " + recipe.get("ingredients").getAsString()
-                            + (recipe.get("table").getAsBoolean() ? " (table)" : "");
-                }
-                lines.add(item);
-            }
-            if (page.has("nextOffset")) {
-                lines.add("Next offset " + page.get("nextOffset").getAsInt() + ".");
-            }
-            LOGGER.info("[Agent recipe book] {}", page);
-            return String.join("\n", lines);
-        }
-        String json = result.data().toString();
-        if (json.length() > 300) {
-            LOGGER.info("[Agent {}] {}", tool, json);
-            return result.message() + " Details in the run log.";
-        }
-        return result.message() + " " + json;
+        return count;
     }
 
-    private static String formatMap(JsonObject map) {
-        int minX = map.get("minX").getAsInt();
-        int minZ = map.get("minZ").getAsInt();
-        var rows = new ArrayList<StringBuilder>();
-        map.getAsJsonArray("rows").forEach(row -> rows.add(new StringBuilder(row.getAsString())));
-        var labels = new ArrayList<String>();
-        for (var value : map.getAsJsonArray("landmarks")) {
-            var landmark = value.getAsJsonObject();
-            var position = landmark.getAsJsonObject("position");
-            int x = position.get("x").getAsInt();
-            int y = position.get("y").getAsInt();
-            int z = position.get("z").getAsInt();
-            char symbol = switch (landmark.get("kind").getAsString()) {
-                case "sign" -> 'S';
-                case "player" -> 'P';
-                case "actor" -> 'A';
-                default -> 'C';
-            };
-            mark(rows.get(z - minZ), x - minX, symbol);
-            labels.add(symbol + " " + landmark.get("label").getAsString() + " (" + x + ", " + y + ", " + z + ")");
+    private static int demo(CommandContext<ServerCommandSource> context, boolean stop, boolean actor) {
+        var source = context.getSource();
+        var world = source.getWorld();
+        var id = actor ? findActor(source, StringArgumentType.getString(context, "subject")) : null;
+        var subject = actor ? (id == null ? null : world.getEntity(id)) : source.getEntity();
+        if (actor ? !AgentTools.isActor(subject) : !(subject instanceof ServerPlayerEntity)) {
+            source.sendError(Text.literal(actor ? "Choose a nearby agent by name or UUID." : "Record from the 3D player or name an agent."));
+            return 0;
         }
-        for (var value : map.getAsJsonArray("mobs")) {
-            var mob = value.getAsJsonObject();
-            var position = mob.getAsJsonObject("position");
-            int x = position.get("x").getAsInt();
-            int y = position.get("y").getAsInt();
-            int z = position.get("z").getAsInt();
-            char symbol = mob.get("hostile").getAsBoolean() ? '!' : 'M';
-            mark(rows.get(z - minZ), x - minX, symbol);
-            labels.add(symbol + " " + mob.get("type").getAsString().replace("minecraft:", "")
-                    + " #" + mob.get("entityId").getAsInt() + " (" + x + ", " + y + ", " + z + ")");
-        }
-        String names = labels.isEmpty() ? "" : "\n" + String.join("\n", labels);
-        return "Northwest x=" + minX + ", z=" + minZ + ", feet y=" + map.get("feetY").getAsInt()
-                + "\n" + String.join("\n", rows)
-                + "\n" + AgentNavigation.LEGEND + ". S sign, P player, A actor, C chest, ! hostile, M animal." + names;
-    }
-
-    private static void mark(StringBuilder row, int column, char symbol) {
-        char current = row.charAt(column);
-        if (current != '@' && current != 'L' && (symbol == '!' || "#.^v?".indexOf(current) >= 0)) {
-            row.setCharAt(column, symbol);
+        try {
+            var message = stop ? AgentDemonstrations.stop(world, subject.getUuid())
+                    : AgentDemonstrations.start(world, subject, StringArgumentType.getString(context, "name"));
+            source.sendFeedback(() -> Text.literal(message), false);
+            return 1;
+        } catch (AgentTools.ToolFailure failure) {
+            source.sendError(Text.literal(failure.getMessage()));
+            return 0;
         }
     }
 
-    private static String attackSummary(JsonObject view) {
-        var attack = view.getAsJsonObject("attack");
-        if (attack == null) {
-            return "";
+    private static int withActor(CommandContext<ServerCommandSource> context,
+                                 BiFunction<ServerCommandSource, VillagerEntity, Integer> action) {
+        var source = context.getSource();
+        var id = findActor(source, StringArgumentType.getString(context, "actor"));
+        if (id == null || !(source.getWorld().getEntity(id) instanceof VillagerEntity actor) || !AgentTools.isActor(actor)) {
+            return error(source, "Choose a unique actor within 32 blocks, or use its UUID.");
         }
-        return " " + attack.get("message").getAsString()
-                + " Hits: " + attack.get("hits").getAsInt() + "/" + attack.get("requestedSwings").getAsInt() + ".";
+        try {
+            return action.apply(source, actor);
+        } catch (IllegalStateException | AgentTools.ToolFailure failure) {
+            return error(source, failure.getMessage());
+        }
     }
 
-    private static String routeSummary(JsonObject view) {
-        var route = view.getAsJsonObject("route");
-        if (route == null) {
-            return "";
-        }
-        return " " + route.get("message").getAsString() + " Steps: " + route.get("steps").getAsInt()
-                + "/" + route.get("totalSteps").getAsInt() + ".";
+    private static int feedback(ServerCommandSource source, String message) {
+        source.sendFeedback(() -> Text.literal(message), false);
+        return 1;
+    }
+
+    private static int error(ServerCommandSource source, String message) {
+        source.sendError(Text.literal(message));
+        return 0;
     }
 
     private static UUID findActor(ServerCommandSource source, String label) {
         try {
             return UUID.fromString(label);
         } catch (IllegalArgumentException ignored) {
-            List<VillagerEntity> matches = source.getWorld().getEntitiesByClass(VillagerEntity.class,
-                    new Box(source.getPosition(), source.getPosition()).expand(32),
-                    actor -> AgentTools.isActor(actor) && actor.squaredDistanceTo(source.getPosition()) <= 32 * 32
+            var world = source.getWorld();
+            var position = source.getPosition();
+            var matches = world.getEntitiesByClass(VillagerEntity.class, new Box(position, position).expand(32),
+                    actor -> AgentTools.isActor(actor) && actor.squaredDistanceTo(position) <= 32 * 32
                             && actor.getName().getString().equalsIgnoreCase(label));
+            if (matches.size() > 1) {
+                int arena = AgentArena.at(world, BlockPos.ofFloored(position));
+                matches = matches.stream().filter(actor -> AgentArena.actorArena(actor) == arena).toList();
+            }
             return matches.size() == 1 ? matches.get(0).getUuid() : null;
         }
     }

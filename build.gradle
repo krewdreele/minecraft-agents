@@ -5,6 +5,18 @@ plugins {
 group = 'org.minecraftagents'
 version = mod_version
 
+def localAppData = System.getenv('LOCALAPPDATA')
+def checkout = layout.projectDirectory.asFile.toPath().normalize()
+def onOneDrive = ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial'].any { name ->
+    def syncRoot = System.getenv(name)
+    syncRoot && checkout.startsWith(new File(syncRoot).toPath().normalize())
+}
+if (localAppData && onOneDrive) {
+    // Gradle needs to be able to replace generated class directories on each rebuild.
+    def checkoutId = UUID.nameUUIDFromBytes(projectDir.canonicalPath.getBytes('UTF-8'))
+    layout.buildDirectory = new File(localAppData, "MinecraftAgents/builds/${checkoutId}")
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${minecraft_version}"
     mappings "net.fabricmc:yarn:${yarn_mappings}:v2"
