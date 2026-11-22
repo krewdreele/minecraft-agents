@@ -55,6 +55,7 @@ public final class AgentLoop {
     private static String start(ServerWorld world, VillagerEntity actor, int turns, String goal, AgentModelClient client,
                                 UUID operator, JsonObject skill) {
         UUID actorId = actor.getUuid();
+        AgentTools.require(!AgentRocket.isActive(world, actorId), "Stop the ROCKET-3 trial first.");
         if (goal.isBlank() || goal.length() > 200) {
             throw new IllegalStateException("Use a goal of 1 to 200 characters.");
         }
@@ -87,6 +88,7 @@ public final class AgentLoop {
         var run = WORLDS.getOrDefault(world, Map.of()).get(actorId);
         boolean running = run != null && run.running();
         boolean acting = AgentSkills.isActive(world, actorId) || AgentInput.isActive(world, actorId);
+        AgentRocket.stop(world, actorId);
         if (running) {
             run.finish("Stopped by the operator.");
         }

@@ -68,6 +68,34 @@ Programs dispatch virtual keyboard and mouse inputs and use `if`, `while`, `asse
 
 Runs are bounded to 128 inputs, 384 instructions, and 2,400 ticks. Libraries persist with the world.
 
+## ROCKET-3 trial
+
+Run one villager at a time in graphical singleplayer. Aim at a block or mob to mark the target, then choose an interaction. The trial switches to the villager's view and sends the reference image, target mask, and live frames to a local worker.
+
+1. Set up the [ROCKET-3 inference dependencies](https://github.com/CraftJarvis/ROCKET-3/tree/ddc91e4f3f62d51a9227d95c93a631294926a61c) in a separate Python environment. The CUDA smoke test used Ubuntu under WSL2, Python 3.11, PyTorch 2.7.1 with CUDA 12.8, and the additional resolver pins `numpy<2` and `pyglet==1.4.0b1` with the upstream requirements. Make the ROCKET-3 checkout importable through `PYTHONPATH` and download the [released checkpoint](https://huggingface.co/CraftJarvis/ROCKET-3-1.5x/tree/91a3bd12115befb210158d37ab302265deff4f5d).
+2. From this repository, start the worker in that Python environment.
+
+   ```sh
+   python worker/rocket3_worker.py --checkpoint /path/to/rocket3.ckpt --device cuda --check
+   python worker/rocket3_worker.py --checkpoint /path/to/rocket3.ckpt --device cuda
+   ```
+
+   Use `--mock` in place of the checkpoint for a no-op worker that checks the camera and transport. The worker listens at `127.0.0.1:8766`. Set `ROCKET3_PORT` in both launch environments to use a different port.
+3. Launch Minecraft, create an arena with `/agent arena`, and aim at a block from close enough to reach it. For `approach`, you can also mark a mob within three blocks of you. Run one of the commands below and hold your view on the target as chat closes. Supply a mask width percentage, as in `/agent rocket Ada approach 12`, to resize the square around the target.
+4. Check `/agent status Ada` for applied actions, late replies, blocked off-target attacks, and the outcome. Use `/agent stop Ada` to end the run. The camera and HUD return to the operator after the trial.
+
+| Command | Result Fabric checks |
+| --- | --- |
+| `/agent rocket Ada approach` | Ada gets within three blocks of the marked block or mob. |
+| `/agent rocket Ada break` | Ada breaks the marked block. |
+| `/agent rocket Ada collect` | Ada breaks the marked block and picks up one of its drops. For tool-required blocks, start with a suitable tool in her selected slot. |
+| `/agent rocket Ada use` | Ada toggles the marked lever or door that opens by hand, or presses the marked button. |
+| `/agent rocket Ada` | The original oak-log collection trial. |
+
+Use `/agent rocket Ada task walk to this block` for a plain-language alias. Other examples include `task mine this block`, `task collect this block's drops`, and `task toggle this block`. The crosshair chooses the target in every mode. Each run carries one visual goal and interaction. Compound goals need a planner to choose targets and sequence the interactions.
+
+Inference runs outside the game tick, and Fabric discards replies older than three ticks. Restart the worker when switching to this version of the mod so it can receive the interaction ID.
+
 ## Build versions
 
 | Component | Version |

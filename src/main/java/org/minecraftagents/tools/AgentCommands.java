@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.BiFunction;
 
@@ -54,6 +55,7 @@ public final class AgentCommands {
         agent.then(literal("status").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::status)));
         agent.then(literal("stop").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::stop)));
         agent.then(literal("view").then(argument("actor", StringArgumentType.word()).executes(AgentCommands::view)));
+        agent.then(rocketCommand());
         agent.then(literal("debug").then(argument("actor", StringArgumentType.word())
                 .then(literal("plan").executes(context -> debug(context, DebugAction.PLAN)))
                 .then(literal("run").executes(context -> debug(context, DebugAction.RUN)))
@@ -143,12 +145,42 @@ public final class AgentCommands {
         });
     }
 
+    private static LiteralArgumentBuilder<ServerCommandSource> rocketCommand() {
+        var actor = argument("actor", StringArgumentType.word())
+                .executes(context -> rocket(context, AgentRocket.Task.OAK_LOG, 18))
+                .then(argument("mask_percent", IntegerArgumentType.integer(2, 60))
+                        .executes(context -> rocket(context, AgentRocket.Task.OAK_LOG,
+                                IntegerArgumentType.getInteger(context, "mask_percent"))))
+                .then(literal("task").then(argument("instruction", StringArgumentType.greedyString())
+                        .executes(context -> rocket(context, null, 18))));
+        for (var task : List.of(AgentRocket.Task.APPROACH, AgentRocket.Task.BREAK,
+                AgentRocket.Task.COLLECT, AgentRocket.Task.USE)) {
+            actor.then(literal(task.command())
+                    .executes(context -> rocket(context, task, 18))
+                    .then(argument("mask_percent", IntegerArgumentType.integer(2, 60))
+                            .executes(context -> rocket(context, task, IntegerArgumentType.getInteger(context, "mask_percent")))));
+        }
+        return literal("rocket").then(actor);
+    }
+
+    private static int rocket(CommandContext<ServerCommandSource> context, AgentRocket.Task task, int maskPercent) {
+        return withActor(context, (source, actor) -> {
+            var selected = task != null ? task : AgentRocket.Task.fromInstruction(StringArgumentType.getString(context, "instruction"));
+            var player = source.getEntity() instanceof ServerPlayerEntity operator ? operator : null;
+            return feedback(source, AgentRocket.start(source.getWorld(), actor, player, selected, maskPercent));
+        });
+    }
+
     private static int status(CommandContext<ServerCommandSource> context) {
         return withActor(context, (source, actor) -> {
             var world = source.getWorld();
             var id = actor.getUuid();
             var loop = AgentLoop.status(world, id);
             var skill = AgentSkills.status(world, id);
+            var rocket = AgentRocket.status(world, id);
+            if (rocket != null) {
+                feedback(source, "ROCKET-3 · " + rocket);
+            }
             if (loop != null) {
                 feedback(source, "Model · " + loop);
             }

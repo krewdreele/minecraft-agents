@@ -15,9 +15,11 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import org.minecraftagents.tools.AgentRocket.Button;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -105,7 +107,44 @@ public final class AgentInput {
     static boolean isActive(ServerWorld world, UUID id) {
         var controls = WORLDS.get(world);
         var control = controls == null ? null : controls.get(id);
-        return control != null && control.hold != null;
+        return AgentRocket.isActive(world, id) || (control != null && control.hold != null);
+    }
+
+    static boolean rocketStep(ServerWorld world, VillagerEntity actor, AgentRocket.Action action, BlockPos target) {
+        var control = WORLDS.computeIfAbsent(world, ignored -> new HashMap<>())
+                .computeIfAbsent(actor.getUuid(), ignored -> new Control());
+        float yaw = MathHelper.wrapDegrees(actor.getYaw() + action.yaw());
+        actor.setYaw(yaw);
+        actor.setHeadYaw(yaw);
+        actor.setBodyYaw(yaw);
+        actor.setPitch(MathHelper.clamp(actor.getPitch() + action.pitch(), -90, 90));
+        int forward = (action.pressed(Button.FORWARD) ? 1 : 0) - (action.pressed(Button.BACK) ? 1 : 0);
+        int right = (action.pressed(Button.RIGHT) ? 1 : 0) - (action.pressed(Button.LEFT) ? 1 : 0);
+        move(world, actor, forward, right, action.pressed(Button.JUMP));
+        if (target == null || !action.pressed(Button.ATTACK)) {
+            control.rocketMining.clearCracks(world);
+            return false;
+        }
+        var hit = AgentVision.target(world, actor, AgentVision.REACH);
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(target)) {
+            control.rocketMining.clearCracks(world);
+            return hit.getType() == HitResult.Type.BLOCK;
+        }
+        control.rocketMining.hit(world, actor, control.slot, hit, true);
+        return false;
+    }
+
+    static ItemStack heldStack(ServerWorld world, VillagerEntity actor) {
+        var control = WORLDS.getOrDefault(world, Map.of()).get(actor.getUuid());
+        int slot = control == null ? 0 : control.slot;
+        return slot < actor.getInventory().size() ? actor.getInventory().getStack(slot) : ItemStack.EMPTY;
+    }
+
+    static void releaseRocketAttack(ServerWorld world, UUID actor) {
+        var control = WORLDS.getOrDefault(world, Map.of()).get(actor);
+        if (control != null) {
+            control.rocketMining.clearCracks(world);
+        }
     }
 
     static void cancel(ServerWorld world, UUID id) {
@@ -142,6 +181,7 @@ public final class AgentInput {
                 var stack = item.getStack();
                 int collected = AgentInventory.insert(actor.getInventory(), stack, stack.getCount());
                 if (collected > 0) {
+                    AgentRocket.pickedUp(world, actor.getUuid(), item.getUuid());
                     AgentDebug.effect(world, actor, "Picked up " + collected + " " + Registries.ITEM.getId(stack.getItem()));
                 }
                 if (collected == stack.getCount()) {
@@ -161,6 +201,27 @@ public final class AgentInput {
         BlockPos destination = BlockPos.ofFloored(actor.getPos().add(delta));
         return !world.isOutOfHeightLimit(destination) && world.isChunkLoaded(ChunkPos.toLong(destination))
                 && world.getWorldBorder().contains(actor.getBoundingBox().offset(delta));
+    }
+
+    private static void move(ServerWorld world, VillagerEntity actor, int forward, int right, boolean jump) {
+        var facing = AgentVision.direction(actor.getYaw(), 0);
+        var sideways = new Vec3d(-facing.z, 0, facing.x);
+        Vec3d delta = facing.multiply(forward).add(sideways.multiply(right)).normalize().multiply(WALK_SPEED);
+        if (jump && actor.isOnGround()) {
+            actor.setVelocity(actor.getVelocity().add(0, 0.42, 0));
+            actor.setOnGround(false);
+        }
+        if (delta.lengthSquared() > 0 && canMove(world, actor, delta)) {
+            actor.move(MovementType.SELF, delta);
+        }
+    }
+
+    private static Set<UUID> nearbyDrops(ServerWorld world, BlockPos block) {
+        Set<UUID> ids = new HashSet<>();
+        for (var entity : world.getEntitiesByClass(ItemEntity.class, new Box(block).expand(1), ItemEntity::isAlive)) {
+            ids.add(entity.getUuid());
+        }
+        return ids;
     }
 
     private static void useHeldBlock(ServerWorld world, VillagerEntity actor, BlockHitResult hit, int slot) {
@@ -201,6 +262,7 @@ public final class AgentInput {
     private static final class Control {
         private int slot;
         private Hold hold;
+        private final Hold rocketMining = new Hold(1);
     }
 
     private static final class Hold {
@@ -223,29 +285,17 @@ public final class AgentInput {
 
         private void tick(ServerWorld world, VillagerEntity actor, int slot) {
             if (keys == null) {
-                hit(world, actor, slot);
+                hit(world, actor, slot, AgentVision.target(world, actor, AgentVision.REACH), false);
                 return;
             }
-            double forward = amount("w", "s");
-            double right = amount("d", "a");
-            var facing = AgentVision.direction(actor.getYaw(), 0);
-            var sideways = new Vec3d(-facing.z, 0, facing.x);
-            Vec3d delta = facing.multiply(forward).add(sideways.multiply(right)).normalize().multiply(WALK_SPEED);
-            if (keys.contains("space") && actor.isOnGround()) {
-                actor.setVelocity(actor.getVelocity().add(0, 0.42, 0));
-                actor.setOnGround(false);
-            }
-            if (delta.lengthSquared() > 0 && canMove(world, actor, delta)) {
-                actor.move(MovementType.SELF, delta);
-            }
+            move(world, actor, amount("w", "s"), amount("d", "a"), keys.contains("space"));
         }
 
         private int amount(String positive, String negative) {
             return (keys.contains(positive) ? 1 : 0) - (keys.contains(negative) ? 1 : 0);
         }
 
-        private void hit(ServerWorld world, VillagerEntity actor, int slot) {
-            var hit = AgentVision.target(world, actor, AgentVision.REACH);
+        private void hit(ServerWorld world, VillagerEntity actor, int slot, BlockHitResult hit, boolean trackDrops) {
             var pos = hit.getBlockPos();
             if (hit.getType() != HitResult.Type.BLOCK || !world.getWorldBorder().contains(pos)
                     || !world.isChunkLoaded(ChunkPos.toLong(pos))) {
@@ -269,9 +319,15 @@ public final class AgentInput {
             boolean suitable = !block.isToolRequired() || tool.isSuitableFor(block);
             progress += hardness == 0 ? 1 : tool.getMiningSpeedMultiplier(block) / hardness / (suitable ? 30 : 100);
             if (progress >= 1 - 0.000001f) {
+                Set<UUID> previousDrops = trackDrops ? nearbyDrops(world, pos) : Set.of();
                 if (breakHeldBlock(world, actor, pos, block, tool, suitable)) {
                     AgentDebug.effect(world, actor, "Broke " + Registries.BLOCK.getId(block.getBlock())
                             + " at " + pos.toShortString());
+                    if (trackDrops) {
+                        var spawnedDrops = nearbyDrops(world, pos);
+                        spawnedDrops.removeAll(previousDrops);
+                        AgentRocket.mined(world, actor.getUuid(), spawnedDrops);
+                    }
                 }
                 clearCracks(world);
             } else {
